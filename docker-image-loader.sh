@@ -11,7 +11,9 @@ usage() {
   >&2 echo "trusted GPG keys, and if so, load it into Docker."
   >&2 echo ""
   >&2 echo "Usage:"
-  >&2 echo " MIN_SIGNATURES=2 $0 [image tar file]"
+  >&2 echo " MIN_SIGNATURES=2 $0 [image name]"
+  >&2 echo ""
+  >&2 echo " MIN_SIGNATURES=2 $0 [full path to image tar file]"
 }
 
 die () {
@@ -25,6 +27,52 @@ containsElement () {
   return 1
 }
 
+# Arg1: Signature file
+# Arg2: Signed image file
+verifySignature() {
+  local sig=$1
+  local image=$2
+  local result
+
+  if ! result=$(gpg --verbose --verify ${sig} ${image} 2>&1) ; then
+    echo "Invalid signature ${sig}"
+    return 1
+  fi
+
+  # Require SHA512
+  if ! echo ${result} | grep SHA512 > /dev/null ; then
+    echo "Invalid digest"
+    return 1
+  fi
+
+  # Require good signature
+  if ! echo ${result} | grep "Good signature" > /dev/null ; then
+    echo "Not Good."
+    return 1
+  fi
+
+  # We don't want a WARNING
+  if echo ${result} | grep WARNING > /dev/null; then
+    echo "WARNING caught: ${result}"
+    return 1
+  fi
+
+  local keyID=$(echo ${result} | sed -e "s/.*key ID \([A-z0-9]*\).*/\1/")
+
+  if containsElement ${keyID} ${KEYS_ARRAY}; then
+    # Duplicate keys are not OK.
+    echo "Duplicate signing keyID: ${keyID}!"
+    return 1
+  fi
+
+  echo "Good signature from ${keyID} in file ${sig}"
+
+  # push this key ID onto the array
+  KEYS_ARRAY+=(${keyID})
+
+  return 0
+}
+
 # Main
 
 if [ $# -ne 1 ] || [ "x${MIN_SIGNATURES}" == "x" ] ; then
@@ -32,42 +80,32 @@ if [ $# -ne 1 ] || [ "x${MIN_SIGNATURES}" == "x" ] ; then
   exit 1
 fi
 
-IMAGE_FILE=$1
+# If the argument provided begins with ./ or / then assume it's a
+# complete path.
+if echo "$1" | egrep '^[\.]*/' ; then
+  IMAGE_FILE=$1
+else
+  # Otherwise, assume it's relative to the docker-image-downloader.
+  DOWNLOADED_STORAGE=/var/docker-image-downloader
+  IMAGE_SAFENAME=$(echo $1 | tr "/: " .)
+  IMAGE_FILE=${DOWNLOADED_STORAGE}/${IMAGE_SAFENAME}/${IMAGE_SAFENAME}.tar
+fi
+
+[ -r ${IMAGE_FILE} ] || die "Could not read file ${IMAGE_FILE}"
 
 KEYS_ARRAY=()
 
 for sig in ${IMAGE_FILE}.*.sig; do
   echo "Verifying ${sig}..."
 
-  result=$(gpg --verbose --verify ${sig} ${IMAGE_FILE} 2>&1) ||
-    die "Invalid signature ${sig}"
-
-  echo ${result} | grep SHA512 > /dev/null ||
-    die "Invalid digest"
-
-  echo ${result} | grep Good > /dev/null ||
-    die "Not Good."
-
-  echo ${result} | grep WARNING > /dev/null &&
-    die "WARNING caught: ${result}"
-
-  keyID=$(echo ${result} | sed -e "s/.*key ID \([A-z0-9]*\).*/\1/")
-
-  if containsElement ${keyID} ${KEYS_ARRAY}; then
-    die "Duplicate signing keyID: ${keyID}!"
-  fi
-
-  echo "Good signature from ${keyID} in file ${sig}"
-
-  # push this key ID onto the array
-  KEYS_ARRAY+=(${keyID})
+  verifySignature ${sig} ${IMAGE_FILE}
 done
 
 if [ ${#KEYS_ARRAY[@]} -lt ${MIN_SIGNATURES} ]; then
-  die "Too few sigatures! ${MIN_SIGNATURES} required, ${#KEYS_ARRAY[@]} provided."
+  die "Too few signatures! ${MIN_SIGNATURES} required, ${#KEYS_ARRAY[@]} provided."
 fi
 
-echo "Importing into Docker..."
+echo "${#KEYS_ARRAY[@]} signatures are good, ${MIN_SIGNATURES} required. Importing into Docker..."
 
 # We haven't aborted, so let's instruct docker to load the signed image.
 docker load --input=${IMAGE_FILE} ||
