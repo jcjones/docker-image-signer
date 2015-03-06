@@ -57,7 +57,7 @@ verifySignature() {
     return 1
   fi
 
-  local keyID=$(echo ${result} | sed -e "s/.*key ID \([A-z0-9]*\).*/\1/")
+  local keyID=$(echo ${result} | sed -e "s/.*key ID \([A-Z0-9]*\).*/\1/")
 
   if containsElement ${keyID} ${KEYS_ARRAY}; then
     # Duplicate keys are not OK.
